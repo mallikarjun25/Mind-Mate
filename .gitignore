@@ -1,1 +1,3 @@
-echo ".env" >> .gitignore
+# 1. ignore environment files
+.env
+*.env
