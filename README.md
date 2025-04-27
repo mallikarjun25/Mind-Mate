@@ -16,6 +16,7 @@ It provides:
 ---
 
 ## Project Structure
+```bash
 Mind-Mate/
 ├── data/ # PDFs used as knowledge base
 ├── src/
@@ -24,7 +25,7 @@ Mind-Mate/
     ├── medibot.py # Chainlit chatbot app
 ├── requirements.txt # Project dependencies
 ├── README.md # Project overview and usage
-
+```
 
 ---
 
