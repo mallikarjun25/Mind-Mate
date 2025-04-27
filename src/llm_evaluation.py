@@ -12,8 +12,10 @@ from langchain.chains import RetrievalQA
 from langchain_core.prompts import PromptTemplate
 
 # === CONFIGURATION ===
-DB_FAISS_PATH = r"C:\\Users\\maith1\\Downloads\\mind_mate\\Mind-Mate\\src\\vectorstore\\db_faiss"
-MODEL_CACHE_DIR = r"C:\\Users\\maith1\\.cache\\huggingface\\hub"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+DB_FAISS_PATH = os.path.join(BASE_DIR, "vectorstore", "db_faiss")
+MODEL_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
 OUTPUT_CSV = f"model_outputs_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.csv"
 
 # Model download details

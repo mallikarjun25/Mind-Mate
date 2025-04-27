@@ -14,8 +14,11 @@ from langchain_core.prompts import PromptTemplate
 st.set_page_config(page_title="Mind Mate", page_icon="🧠", layout="wide")
 
 # === CONFIGURATION ===
-DB_FAISS_PATH = r"C:\\Users\\maith1\\Downloads\\mind_mate\\Mind-Mate\\src\\vectorstore\\db_faiss"
-MODEL_CACHE_DIR = r"C:\\Users\\maith1\\.cache\\huggingface\\hub"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+DB_FAISS_PATH = os.path.join(BASE_DIR, "vectorstore", "db_faiss")
+MODEL_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+
 
 # App title and description
 st.title("🧠 Mind Mate")
