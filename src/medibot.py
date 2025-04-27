@@ -1,35 +1,27 @@
 import os
-import warnings
-import chainlit as cl
-from huggingface_hub import hf_hub_download
-from textblob import TextBlob
 import torch
+import streamlit as st
+from textblob import TextBlob
+from huggingface_hub import hf_hub_download
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 from langchain_community.llms import LlamaCpp
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.chains import RetrievalQA
 from langchain_core.prompts import PromptTemplate
-import logging
 
-# Suppress deprecation warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
+# Set page configuration
+st.set_page_config(page_title="Mind Mate", page_icon="🧠", layout="wide")
 
-# Suppress specific Huggingface and Chainlit minor warnings
-warnings.filterwarnings("ignore", message="Translation file for en-IN not found.*")
-warnings.filterwarnings("ignore", message="Translated markdown file for en-IN not found.*")
-
-# Set logging to show only important errors
-logging.getLogger("chainlit").setLevel(logging.ERROR)
-logging.getLogger("uvicorn").setLevel(logging.ERROR)
-logging.getLogger("h11").setLevel(logging.ERROR)
-logging.getLogger("asyncio").setLevel(logging.ERROR)
-logging.getLogger("httpcore").setLevel(logging.ERROR)
-
-
+# === CONFIGURATION ===
 DB_FAISS_PATH = r"C:\\Users\\maith1\\Downloads\\mind_mate\\Mind-Mate\\src\\vectorstore\\db_faiss"
 MODEL_CACHE_DIR = r"C:\\Users\\maith1\\.cache\\huggingface\\hub"
 
+# App title and description
+st.title("🧠 Mind Mate")
+st.markdown("Conversations Made Easy!")
+
+# Model download details
 WEIGHTS = {
     "Mistral": (
         "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
@@ -45,12 +37,11 @@ WEIGHTS = {
     ),
 }
 
-DOWNLOADED_MODELS = {}
-
+# Prompt template for RetrievalQA
 PROMPT = PromptTemplate(
     template="""
 Use the pieces of information provided in the context to answer the user's question.
-If you don't know the answer, say "I don't know".
+If you don't know the answer, say \"I don't know\".
 
 CONTEXT:
 {context}
@@ -62,119 +53,142 @@ ANSWER:""",
     input_variables=["context", "question"]
 )
 
+# Load FAISS index
+@st.cache_resource
 def load_vectorstore():
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    return FAISS.load_local(DB_FAISS_PATH, embeddings, allow_dangerous_deserialization=True)
-
-def download_models():
-    for name, (repo_id, filename) in WEIGHTS.items():
-        local_path = hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            cache_dir=MODEL_CACHE_DIR,
-            library_name="llama-cpp"
+    with st.spinner("Loading vector database..."):
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        return FAISS.load_local(
+            DB_FAISS_PATH,
+            embeddings,
+            allow_dangerous_deserialization=True
         )
-        DOWNLOADED_MODELS[name] = local_path
 
-def load_llm(name: str):
-    model_path = DOWNLOADED_MODELS.get(name)
-    if not model_path or not os.path.isfile(model_path):
-        raise ValueError(f"Model file not found for {name}")
+# Load GPT-2 for perplexity
+@st.cache_resource
+def load_perplexity_model():
+    with st.spinner("Loading perplexity model..."):
+        tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+        model = GPT2LMHeadModel.from_pretrained("gpt2").eval()
+        return tokenizer, model
 
-    params = {
-        "model_path": model_path,
-        "n_ctx": 4096,
-        "max_tokens": 512,
-        "temperature": 0.5,
-        "top_k": 50,
-        "top_p": 0.95,
-        "n_threads": 12,
-        "verbose": False
-    }
-
-    # Special fix: if loading Phi-3-mini, enable rope_scaling=dynamic
-    if "Phi-3" in name:
-        params["rope_scaling"] = "dynamic"
-
-    return LlamaCpp(**params)
-
+# Compute perplexity
 def compute_perplexity(text: str, tokenizer, model) -> float:
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
     with torch.no_grad():
         outputs = model(**inputs, labels=inputs["input_ids"])
     return torch.exp(outputs.loss).item()
 
+# Compute hallucination rate
 def hallucination_rate(answer: str, context: str) -> float:
     sentences = [s.strip() for s in answer.split('.') if len(s.strip()) > 20]
     hallucinated = [s for s in sentences if s.lower() not in context.lower()]
     return round(len(hallucinated) / max(len(sentences), 1), 2)
 
-@cl.on_chat_start
-async def start():
-    await cl.Message(content="⚡ Loading MindMate fast mode...").send()
-    try:
-        download_models()
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", model_kwargs={"device": "cpu"})
-        db = FAISS.load_local(DB_FAISS_PATH, embeddings, allow_dangerous_deserialization=True)
-        tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
-        perp_model = GPT2LMHeadModel.from_pretrained("gpt2").eval()
+# Download models if not already present
+@st.cache_resource
+def download_model(name, repo_id, filename):
+    progress_text = f"Downloading {name}..."
+    progress_bar = st.progress(0)
+    
+    with st.spinner(progress_text):
+        local_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            cache_dir=MODEL_CACHE_DIR,
+            library_name="llama-cpp"
+        )
+        progress_bar.progress(100)
+    
+    return local_path
 
-        # Preload ALL LLMs and Chains
-        models = {}
-        chains = {}
-        for name in WEIGHTS:
-            llm = load_llm(name)
-            chain = RetrievalQA.from_chain_type(
-                llm=llm,
-                chain_type="stuff",
-                retriever=db.as_retriever(search_kwargs={"k": 1}),
-                return_source_documents=True,
-                chain_type_kwargs={"prompt": PROMPT}
-            )
-            models[name] = llm
-            chains[name] = chain
+# Load LLM using llama-cpp-python
+@st.cache_resource
+def load_llm(model_path, name):
+    with st.spinner(f"Loading {name} model..."):
+        return LlamaCpp(
+            model_path=model_path,
+            n_ctx=4096,
+            max_tokens=512,
+            temperature=0.5,
+            top_k=50,
+            top_p=0.95,
+            n_threads=12,
+            verbose=False
+        )
 
-        cl.user_session.set("chains", chains)
-        cl.user_session.set("tokenizer", tokenizer)
-        cl.user_session.set("perp_model", perp_model)
+# Sidebar for model selection
+st.sidebar.header("Model Selection")
+selected_models = []
+for model_name in WEIGHTS.keys():
+    if st.sidebar.checkbox(model_name, value=True):
+        selected_models.append(model_name)
 
-        await cl.Message(content="✅ MindMate ready! Ask your question now.").send()
-    except Exception as e:
-        await cl.Message(content=f"Initialization error: {e}").send()
+# Query input
+query = st.text_input("Enter your question:", "")
 
-@cl.on_message
-async def main(message):
-    chains = cl.user_session.get("chains")
-    tokenizer = cl.user_session.get("tokenizer")
-    perp_model = cl.user_session.get("perp_model")
-    user_query = message.content
-
-    if not (chains and tokenizer and perp_model):
-        await cl.Message(content="Error: Session not initialized.").send()
-        return
-
-    for name, chain in chains.items():
-        try:
-            actual_query = user_query
-            if "Phi-3" in name:
-                actual_query = "<s> " + user_query  # Add BOS token for Phi-3
-
-            out = chain.invoke({"query": actual_query})
-
-            answer = out.get("result", "")
-            context = " ".join(doc.page_content for doc in out.get("source_documents", []))
-
-            sentiment = TextBlob(answer).sentiment
-            hall_rate = hallucination_rate(answer, context)
-            perplex = compute_perplexity(answer, tokenizer, perp_model)
-
-            response = f"""**{name}**
-**Answer:** {answer}
-
-Polarity: {sentiment.polarity:.3f} | Subjectivity: {sentiment.subjectivity:.3f}
-Hallucination Rate: {hall_rate:.2f} | Perplexity: {perplex:.2f}
-"""
-            await cl.Message(content=response).send()
-
-        except Exception as e:
-            await cl.Message(content=f"Skipping {name}: {e}").send()
+# Run button
+if st.button("Ask") and query and selected_models:
+    # Load resources
+    db = load_vectorstore()
+    tokenizer, perp_model = load_perplexity_model()
+    
+    # Set up columns for results
+    cols = st.columns(len(selected_models))
+    
+    # Process each selected model
+    for i, name in enumerate(selected_models):
+        with cols[i]:
+            st.subheader(name)
+            
+            # Download model if needed
+            repo_id, filename = WEIGHTS[name]
+            try:
+                model_path = download_model(name, repo_id, filename)
+                
+                # Load model and build chain
+                llm = load_llm(model_path, name)
+                
+                chain = RetrievalQA.from_chain_type(
+                    llm=llm,
+                    chain_type="stuff",
+                    retriever=db.as_retriever(search_kwargs={"k": 1}),
+                    return_source_documents=True,
+                    chain_type_kwargs={"prompt": PROMPT}
+                )
+                
+                # Process query
+                with st.spinner(f"Getting response from {name}..."):
+                    out = chain.invoke({"query": query})
+                    answer = out.get("result", "")
+                    context = " ".join(doc.page_content for doc in out.get("source_documents", []))
+                
+                # Compute metrics
+                sentiment = TextBlob(answer).sentiment
+                hall_rate = hallucination_rate(answer, context)
+                perplex = compute_perplexity(answer, tokenizer, perp_model)
+                
+                # Display results
+                st.markdown("### Answer")
+                st.write(answer)
+                
+                # Display metrics
+                metrics_col1, metrics_col2 = st.columns(2)
+                with metrics_col1:
+                    st.metric("Polarity", f"{sentiment.polarity:.3f}")
+                    st.metric("Subjectivity", f"{sentiment.subjectivity:.3f}")
+                with metrics_col2:
+                    st.metric("Hallucination Rate", f"{hall_rate:.2f}")
+                    st.metric("Perplexity", f"{perplex:.2f}")
+                
+                # Option to view source context
+                with st.expander("View Source Context"):
+                    st.write(context)
+                    
+            except Exception as e:
+                st.error(f"Error processing {name}: {str(e)}")
+else:
+    if not query:
+        st.info("Please enter a question above to get started.")
+    elif not selected_models:
+        st.warning("Please select at least one model from the sidebar.")
