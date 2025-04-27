@@ -1,46 +1,56 @@
 import os
-import streamlit as st
-import pandas as pd
+import warnings
+import chainlit as cl
+from huggingface_hub import hf_hub_download
 from textblob import TextBlob
 import torch
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
-
+from langchain_community.llms import LlamaCpp
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_community.llms import HuggingFaceEndpoint
 from langchain.chains import RetrievalQA
 from langchain_core.prompts import PromptTemplate
+import logging
 
-# === CONFIG ===
-DB_FAISS_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "./vectorstore/db_faiss"))
-LLM_REPOS = {
-    "Mistral": "mistralai/Mistral-7B-Instruct-v0.3",
-    "LLaMA3": "meta-llama/Meta-Llama-3-8B-Instruct",
-    "Falcon": "tiiuae/falcon-7b-instruct"
+# Suppress deprecation warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Suppress specific Huggingface and Chainlit minor warnings
+warnings.filterwarnings("ignore", message="Translation file for en-IN not found.*")
+warnings.filterwarnings("ignore", message="Translated markdown file for en-IN not found.*")
+
+# Set logging to show only important errors
+logging.getLogger("chainlit").setLevel(logging.ERROR)
+logging.getLogger("uvicorn").setLevel(logging.ERROR)
+logging.getLogger("h11").setLevel(logging.ERROR)
+logging.getLogger("asyncio").setLevel(logging.ERROR)
+logging.getLogger("httpcore").setLevel(logging.ERROR)
+
+
+DB_FAISS_PATH = r"C:\\Users\\maith1\\Downloads\\mind_mate\\Mind-Mate\\src\\vectorstore\\db_faiss"
+MODEL_CACHE_DIR = r"C:\\Users\\maith1\\.cache\\huggingface\\hub"
+
+WEIGHTS = {
+    "Mistral": (
+        "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+        "mistral-7b-instruct-v0.2.Q4_0.gguf"
+    ),
+    "LLaMA": (
+        "TheBloke/Llama-2-7B-Chat-GGUF",
+        "llama-2-7b-chat.Q4_0.gguf"
+    ),
+    "Phi-3-mini": (
+        "microsoft/Phi-3-mini-4k-instruct-gguf",
+        "Phi-3-mini-4k-instruct-q4.gguf"
+    ),
 }
 
-# === Load tokenizer/model for perplexity ===
-@st.cache_resource
-def load_perplexity_model():
-    tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
-    model = GPT2LMHeadModel.from_pretrained("gpt2")
-    model.eval()
-    return tokenizer, model
+DOWNLOADED_MODELS = {}
 
-def compute_perplexity(text, tokenizer, model):
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
-    with torch.no_grad():
-        outputs = model(**inputs, labels=inputs["input_ids"])
-    loss = outputs.loss
-    return torch.exp(loss).item()
-
-# === Prompt ===
-def set_custom_prompt():
-    return PromptTemplate(
-        template="""
+PROMPT = PromptTemplate(
+    template="""
 Use the pieces of information provided in the context to answer the user's question.
-If you don't know the answer, say "I don't know" — do not make up an answer.
-Only use information from the context. Respond in a clear and direct way.
+If you don't know the answer, say "I don't know".
 
 CONTEXT:
 {context}
@@ -49,104 +59,122 @@ QUESTION:
 {question}
 
 ANSWER:""",
-        input_variables=["context", "question"]
-    )
+    input_variables=["context", "question"]
+)
 
-# === FAISS Vector DB ===
-@st.cache_resource
-def get_vectorstore():
-    embedding_model = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
-    return FAISS.load_local(DB_FAISS_PATH, embedding_model, allow_dangerous_deserialization=True)
+def load_vectorstore():
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    return FAISS.load_local(DB_FAISS_PATH, embeddings, allow_dangerous_deserialization=True)
 
-# === Load LLM ===
-def load_llm(repo_id):
-    HF_TOKEN = os.environ.get("HF_TOKEN")
-    return HuggingFaceEndpoint(
-        repo_id=repo_id,
-        temperature=0.5,
-        model_kwargs={"token": HF_TOKEN, "max_length": "512"}
-    )
+def download_models():
+    for name, (repo_id, filename) in WEIGHTS.items():
+        local_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            cache_dir=MODEL_CACHE_DIR,
+            library_name="llama-cpp"
+        )
+        DOWNLOADED_MODELS[name] = local_path
 
-# === Hallucination Detection ===
-def hallucination_rate(answer, context):
-    answer_snippets = [s.strip() for s in answer.split('.') if len(s.strip()) > 20]
-    hallucinated = [s for s in answer_snippets if s.lower() not in context.lower()]
-    return round(len(hallucinated) / max(len(answer_snippets), 1), 2)
+def load_llm(name: str):
+    model_path = DOWNLOADED_MODELS.get(name)
+    if not model_path or not os.path.isfile(model_path):
+        raise ValueError(f"Model file not found for {name}")
 
-# === Query Handler ===
-def query_model(question, repo_id, retriever, tokenizer, gpt2_model):
-    llm = load_llm(repo_id)
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=retriever,
-        return_source_documents=True,
-        chain_type_kwargs={'prompt': set_custom_prompt()}
-    )
-    result = qa_chain.invoke({'query': question})
-    answer = result["result"]
-    context = " ".join([doc.page_content for doc in result["source_documents"]])
-    sentiment = TextBlob(answer).sentiment
-    halluc_rate = hallucination_rate(answer, context)
-    perplexity = compute_perplexity(answer, tokenizer, gpt2_model)
-
-    return {
-        "response": answer,
-        "polarity": round(sentiment.polarity, 3),
-        "subjectivity": round(sentiment.subjectivity, 3),
-        "hallucination_rate": halluc_rate,
-        "perplexity": round(perplexity, 2)
+    params = {
+        "model_path": model_path,
+        "n_ctx": 4096,
+        "max_tokens": 512,
+        "temperature": 0.5,
+        "top_k": 50,
+        "top_p": 0.95,
+        "n_threads": 12,
+        "verbose": False
     }
 
-# === UI ===
-st.set_page_config(page_title="MindMate Multi-LLM QA", layout="wide")
-st.title("🧠 MindMate - Multi-LLM Mental Health QA")
-st.markdown("Ask a mental health question to compare answers from **Mistral**, **LLaMA3**, and **Falcon**.\n\nEach response is analyzed for sentiment, hallucination rate, and perplexity.")
+    # Special fix: if loading Phi-3-mini, enable rope_scaling=dynamic
+    if "Phi-3" in name:
+        params["rope_scaling"] = "dynamic"
 
-user_query = st.text_input("🔍 Enter your question:")
+    return LlamaCpp(**params)
 
-if user_query:
-    st.info("Running queries... please wait ⏳")
-    retriever = get_vectorstore().as_retriever(search_kwargs={'k': 3})
-    tokenizer, gpt2_model = load_perplexity_model()
+def compute_perplexity(text: str, tokenizer, model) -> float:
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+    with torch.no_grad():
+        outputs = model(**inputs, labels=inputs["input_ids"])
+    return torch.exp(outputs.loss).item()
 
-    rows = []
-    for model_name, repo in LLM_REPOS.items():
+def hallucination_rate(answer: str, context: str) -> float:
+    sentences = [s.strip() for s in answer.split('.') if len(s.strip()) > 20]
+    hallucinated = [s for s in sentences if s.lower() not in context.lower()]
+    return round(len(hallucinated) / max(len(sentences), 1), 2)
+
+@cl.on_chat_start
+async def start():
+    await cl.Message(content="⚡ Loading MindMate fast mode...").send()
+    try:
+        download_models()
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", model_kwargs={"device": "cpu"})
+        db = FAISS.load_local(DB_FAISS_PATH, embeddings, allow_dangerous_deserialization=True)
+        tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+        perp_model = GPT2LMHeadModel.from_pretrained("gpt2").eval()
+
+        # Preload ALL LLMs and Chains
+        models = {}
+        chains = {}
+        for name in WEIGHTS:
+            llm = load_llm(name)
+            chain = RetrievalQA.from_chain_type(
+                llm=llm,
+                chain_type="stuff",
+                retriever=db.as_retriever(search_kwargs={"k": 1}),
+                return_source_documents=True,
+                chain_type_kwargs={"prompt": PROMPT}
+            )
+            models[name] = llm
+            chains[name] = chain
+
+        cl.user_session.set("chains", chains)
+        cl.user_session.set("tokenizer", tokenizer)
+        cl.user_session.set("perp_model", perp_model)
+
+        await cl.Message(content="✅ MindMate ready! Ask your question now.").send()
+    except Exception as e:
+        await cl.Message(content=f"Initialization error: {e}").send()
+
+@cl.on_message
+async def main(message):
+    chains = cl.user_session.get("chains")
+    tokenizer = cl.user_session.get("tokenizer")
+    perp_model = cl.user_session.get("perp_model")
+    user_query = message.content
+
+    if not (chains and tokenizer and perp_model):
+        await cl.Message(content="Error: Session not initialized.").send()
+        return
+
+    for name, chain in chains.items():
         try:
-            result = query_model(user_query, repo, retriever, tokenizer, gpt2_model)
-            rows.append({
-                "Model": model_name,
-                "Response": result["response"],
-                "Polarity": result["polarity"],
-                "Subjectivity": result["subjectivity"],
-                "Hallucination Rate": result["hallucination_rate"],
-                "Perplexity": result["perplexity"]
-            })
+            actual_query = user_query
+            if "Phi-3" in name:
+                actual_query = "<s> " + user_query  # Add BOS token for Phi-3
+
+            out = chain.invoke({"query": actual_query})
+
+            answer = out.get("result", "")
+            context = " ".join(doc.page_content for doc in out.get("source_documents", []))
+
+            sentiment = TextBlob(answer).sentiment
+            hall_rate = hallucination_rate(answer, context)
+            perplex = compute_perplexity(answer, tokenizer, perp_model)
+
+            response = f"""**{name}**
+**Answer:** {answer}
+
+Polarity: {sentiment.polarity:.3f} | Subjectivity: {sentiment.subjectivity:.3f}
+Hallucination Rate: {hall_rate:.2f} | Perplexity: {perplex:.2f}
+"""
+            await cl.Message(content=response).send()
+
         except Exception as e:
-            rows.append({
-                "Model": model_name,
-                "Response": f"Error: {str(e)}",
-                "Polarity": 0,
-                "Subjectivity": 0,
-                "Hallucination Rate": 1.0,
-                "Perplexity": 100.0
-            })
-
-    df = pd.DataFrame(rows)
-
-    # === Summary Table ===
-    st.subheader("📊 Model Comparison")
-    styled_df = df.style.format({
-        "Polarity": "{:.2f}",
-        "Subjectivity": "{:.2f}",
-        "Hallucination Rate": "{:.2f}",
-        "Perplexity": "{:.2f}"
-    }).applymap(lambda v: "color: red" if isinstance(v, float) and v > 0.5 else "", subset=["Hallucination Rate"])
-    st.dataframe(styled_df, use_container_width=True)
-
-    # === Expanded View ===
-    for row in rows:
-        st.markdown(f"### 🤖 {row['Model']}")
-        st.markdown(f"**Response:** {row['Response']}")
-        st.markdown(f"*Polarity:* `{row['Polarity']}` | *Subjectivity:* `{row['Subjectivity']}` | *Hallucination Rate:* `{row['Hallucination Rate']}` | *Perplexity:* `{row['Perplexity']}`")
-        st.markdown("---")
+            await cl.Message(content=f"Skipping {name}: {e}").send()

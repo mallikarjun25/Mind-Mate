@@ -1,6 +1,30 @@
-streamlit
+# Core Libraries
+chainlit
+transformers
+torch
+textblob
+scikit-learn
+numpy
+
+# LangChain and community extensions
 langchain
-sentence-transformers
-faiss-cpu
+langchain-community
+langchain-huggingface
+langchain-core
+
+# Model handling
 huggingface-hub
-python-dotenv
+llama-cpp-python
+
+# Vector storage
+faiss-cpu
+pypdf
+
+# Async support if needed
+aiohttp
+
+# Optional: (for faster performance on Windows)
+tqdm
+
+# Optional but recommended: Sentence Transformer for better embeddings
+sentence-transformers
