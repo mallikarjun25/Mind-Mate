@@ -5,6 +5,8 @@ torch
 textblob
 scikit-learn
 numpy
+aiohttp
+tqdm
 
 # LangChain and community extensions
 langchain
@@ -16,15 +18,9 @@ langchain-core
 huggingface-hub
 llama-cpp-python
 
-# Vector storage
+# Vector storage and PDF reading
 faiss-cpu
 pypdf
 
-# Async support if needed
-aiohttp
-
-# Optional: (for faster performance on Windows)
-tqdm
-
-# Optional but recommended: Sentence Transformer for better embeddings
+# Embeddings
 sentence-transformers
